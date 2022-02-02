@@ -17,7 +17,8 @@ package node
 import (
 	"context"
 	"fmt"
-
+	"github.com/aws/karpenter/pkg/utils/functional"
+	"github.com/aws/karpenter/pkg/utils/node"
 	"go.uber.org/multierr"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -74,6 +75,20 @@ func (c *Controller) Reconcile(ctx context.Context, req reconcile.Request) (reco
 	}
 	if !stored.DeletionTimestamp.IsZero() {
 		return reconcile.Result{}, nil
+	}
+
+	unreachableTaint := &v1.Taint{
+		Key:    "node.kubernetes.io/unreachable",
+		Effect: "NoSchedule",
+	}
+	if node.TaintExists(stored.Spec.Taints, unreachableTaint) && !functional.ContainsString(stored.Finalizers, v1alpha5.TerminationFinalizer) {
+		logging.FromContext(ctx).Infof("Node %s is not reachable. Removing finalizer", stored.Name)
+		newNode := stored.DeepCopy()
+		newNode.Finalizers = functional.StringSliceWithout(newNode.Finalizers, v1alpha5.TerminationFinalizer)
+		if err := c.kubeClient.Patch(ctx, newNode, client.MergeFrom(stored)); err != nil {
+			return reconcile.Result{}, fmt.Errorf("removing finalizer from node, %w", err)
+		}
+		return reconcile.Result{Requeue: true}, nil
 	}
 
 	// 2. Retrieve Provisioner
